@@ -3,7 +3,6 @@ import { logger } from '../utils/logger.js';
 import { getLevelingConfig, getUserLevelData } from '../services/leveling.js';
 import { addXp } from '../services/xpSystem.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
-import { parsePrefixCommand } from '../utils/prefixParser.js';
 import { supportsPrefixExecution, executePrefixCommand, resolvePrefixAccessKey } from '../utils/messageAdapter.js';
 import { resolveCommandAlias, resolveSubcommandAlias } from '../config/commandAliases.js';
 import { getPrefixRestriction } from '../config/prefixRestrictions.js';
@@ -45,42 +44,50 @@ export default {
 
 async function handlePrefixCommand(message, client) {
   try {
-    const guildConfig = await getGuildConfig(client, message.guild.id);
-    const prefix = guildConfig?.prefix || client.config.bot.prefix || 'p';
-    
-    // فلترة ومقاطعة سريعة للتأكد أن الرسالة تبدأ بحرف p غصب عن نظام السلاش
     let content = message.content.trim();
-    if (!content.toLowerCase().startsWith('p')) return;
+    let lowerContent = content.toLowerCase();
 
-    // فصل حرف الـ p عن باقي الكلمات التي بعده
-    const argsAfterP = content.slice(1).trim().split(/ +/);
-    let firstArg = argsAfterP.shift()?.toLowerCase();
+    // التحقق الصارم: هل الرسالة تبدأ بحرف p؟
+    if (!lowerContent.startsWith('p')) return;
 
-    if (!firstArg) return;
+    let commandName = 'music';
+    let args = ['play'];
 
-    let commandName = '';
-    let args = [];
-
-    // إذا كتبت p play creep أو p creep يحولها فورا لأمر الميوزك الشغال داخلياً
-    if (firstArg === 'play' || firstArg === 'p') {
-      commandName = 'music';
-      args = ['play', ...argsAfterP];
-    } else {
-      commandName = firstArg;
-      args = argsAfterP;
+    // 1. التعامل مع صيغة: p play creep أو p play creep
+    if (lowerContent.startsWith('p ') || lowerContent.startsWith('p-') || lowerContent.startsWith('p!')) {
+      const remain = content.slice(1).trim().split(/ +/);
+      const sub = remain.shift()?.toLowerCase();
+      
+      if (sub === 'play') {
+        args = ['play', ...remain];
+      } else {
+        args = ['play', sub, ...remain].filter(Boolean);
+      }
+    } 
+    // 2. التعامل مع صيغة: pplay creep
+    else if (lowerContent.startsWith('pplay')) {
+      const remain = content.slice(5).trim().split(/ +/);
+      args = ['play', ...remain];
+    }
+    // 3. التعامل مع صيغة الاختصار السريع: pcreep
+    else {
+      const remain = content.slice(1).trim().split(/ +/);
+      if (remain.length === 0 || remain[0] === '') return;
+      args = ['play', ...remain];
     }
 
-    logger.info(`Prefix command detected via forced 'p': ${commandName}, args: ${args.join(', ')}`);
+    const guildConfig = await getGuildConfig(client, message.guild.id);
+    const prefix = 'p';
 
-    const resolvedCommandName = resolveCommandAlias(commandName);
-    const command = client.commands.get(resolvedCommandName);
+    logger.info(`[FORCED P] Executing music command with args: ${args.join(', ')}`);
 
+    const command = client.commands.get('music');
     if (!command) {
-      logger.warn(`Command not found: ${resolvedCommandName}`);
+      logger.warn(`Music command not found in client.commands`);
       return; 
     }
 
-    // هنا تم تدمير وتخطي قيود الـ Slash Command عشان يشتغل الـ p بدون رسائل خطأ
+    // فحص الصلاحيات الأساسية فقط وتخطي فلاتر الـ Slash Commands تماماً
     if (!(await isCommandEnabled(client, message.guild.id, resolvePrefixAccessKey(command.data, args), command.category))) {
       const embed = createEmbed({
         title: 'Command Disabled',
@@ -95,11 +102,7 @@ async function handlePrefixCommand(message, client) {
       guildId: message.guild.id,
       user: message.author,
     };
-    const abuseProtection = await enforceAbuseProtection(
-      mockInteractionForProtection,
-      command,
-      resolvedCommandName,
-    );
+    const abuseProtection = await enforceAbuseProtection(mockInteractionForProtection, command, 'music');
     if (!abuseProtection.allowed) {
       const formattedCooldown = formatCooldownDuration(abuseProtection.remainingMs);
       const embed = createEmbed({
@@ -111,8 +114,7 @@ async function handlePrefixCommand(message, client) {
       return;
     }
 
-    logger.info(`Executing forced prefix command: ${prefix} ${commandName} by ${message.author.tag}`);
-    
+    // التشغيل الفوري غصب عن أنف النظام
     await executePrefixCommand(command, message, args, client, prefix, guildConfig);
   } catch (error) {
     logger.error('Error handling prefix command:', error);
