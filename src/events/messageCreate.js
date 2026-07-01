@@ -47,40 +47,31 @@ async function handlePrefixCommand(message, client) {
     let content = message.content.trim();
     let lowerContent = content.toLowerCase();
 
-    // التأكد الصارم أن الرسالة تبدأ بحرف p
-    if (!lowerContent.startsWith('p')) return;
+    // التحقق الصارم: يجب أن تبدأ الرسالة بحرف p ومعه مسافة حتماً مثل: p creep
+    if (!lowerContent.startsWith('p ')) return;
+
+    // قطع حرف الـ p والمسافة وأخذ اسم الأغنية أو الأمر المكتوب بعدها
+    const remain = content.slice(2).trim().split(/ +/);
+    const firstWord = remain[0]?.toLowerCase();
+    
+    if (!firstWord) return;
 
     let args = [];
 
-    // 1. إذا كتبت: p play creep أو p creep
-    if (lowerContent.startsWith('p ')) {
-      const remain = content.slice(1).trim().split(/ +/);
-      const sub = remain.shift()?.toLowerCase();
-      
-      if (sub === 'play') {
-        args = ['play', ...remain];
-      } else {
-        args = ['play', sub, ...remain].filter(Boolean);
-      }
-    } 
-    // 2. إذا كتبت: pplay creep
-    else if (lowerContent.startsWith('p')) {
-      const remain = content.slice(5).trim().split(/ +/);
+    // إذا كتبت p play creep يتعامل معها بشكل طبيعي
+    if (firstWord === 'play') {
+      remain.shift(); // حذف كلمة play من الأرجومنتس
       args = ['play', ...remain];
-    }
-    // 3. إذا كتبت السريع على طول: pcreep
+    } 
+    // إذا كتبت p creep على طول، يحولها تلقائياً بالخلفية إلى أمر تشغيل للأغنية
     else {
-      const remain = content.slice(1).trim().split(/ +/);
-      if (remain.length === 0 || remain[0] === '') return;
       args = ['play', ...remain];
     }
 
     const guildConfig = await getGuildConfig(client, message.guild.id);
-    
-    // الحل السحري: نوهم الكود الأساسي أن البريفكس الفعلي هو "p" كامل بدون دمج
     const prefix = 'p '; 
 
-    logger.info(`[FORCED P FIX] Target args: ${args.join(', ')}`);
+    logger.info(`[DIRECT P MUSIC] Forwarding args: ${args.join(', ')}`);
 
     const command = client.commands.get('music');
     if (!command) {
@@ -114,7 +105,6 @@ async function handlePrefixCommand(message, client) {
       return;
     }
 
-    // نمرر الترتيب الصحيح تماماً للدالة الأساسية للمشروع
     await executePrefixCommand(command, message, args, client, prefix, guildConfig);
   } catch (error) {
     logger.error('Error handling prefix command:', error);
