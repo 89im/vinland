@@ -3,6 +3,10 @@ import { logger } from '../utils/logger.js';
 import { getLevelingConfig, getUserLevelData } from '../services/leveling.js';
 import { addXp } from '../services/xpSystem.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
+import { parsePrefixCommand } from '../utils/prefixParser.js';
+import { supportsPrefixExecution, executePrefixCommand, resolvePrefixAccessKey } from '../utils/messageAdapter.js';
+import { resolveCommandAlias, resolveSubcommandAlias } from '../config/commandAliases.js';
+import { getPrefixRestriction } from '../config/prefixRestrictions.js';
 import { getGuildConfig } from '../services/guildConfig.js';
 import { enforceAbuseProtection, formatCooldownDuration } from '../utils/abuseProtection.js';
 import { createEmbed } from '../utils/embeds.js';
@@ -30,6 +34,11 @@ export default {
         return;
       }
 
+      // 🚀 هنا نظام الاعتراض السحري اللي يلقط p ويشغل الأغنية فوراً
+      const magicExecuted = await interceptMagicPlay(message, client);
+      if (magicExecuted) return;
+
+      // إذا ما كانت أغنية، يكمل شغله الطبيعي لباقي الأوامر
       await handlePrefixCommand(message, client);
 
       await handleLeveling(message, client);
@@ -39,242 +48,115 @@ export default {
   }
 };
 
-async function handlePrefixCommand(message, client) {
-  try {
+// 🎵 الدالة السحرية لتشغيل الأغاني باختصار p
+async function interceptMagicPlay(message, client) {
     let content = message.content.trim();
     let lowerContent = content.toLowerCase();
 
-    // التحقق الصارم: يجب أن تبدأ الرسالة بحرف p ومعه مسافة حتماً مثل: p creep
-    if (!lowerContent.startsWith('p ')) return;
+    // نلقط الرسالة فقط إذا بدأت بـ p ومسافة
+    if (!lowerContent.startsWith('p ')) return false;
 
-    // قطع حرف الـ p والمسافة وأخذ اسم الأغنية المكتوب بعدها
-    let songQuery = content.slice(2).trim();
-    if (!songQuery) return;
+    let remain = content.slice(2).trim();
+    if (!remain) return false;
 
-    // إذا كتبت p play creep بالخطأ، ننظف كلمة play عشان ما تتكرر
-    if (songQuery.toLowerCase().startsWith('play ')) {
-      songQuery = songQuery.slice(5).trim();
-    }
-    if (!songQuery) return;
+    let args = remain.split(/ +/);
+    let firstWord = args[0].toLowerCase();
+    let songQuery = remain;
 
-    logger.info(`[DIRECT P MUSIC] Intercepted song query: ${songQuery}`);
-
-    const command = client.commands.get('music');
-    if (!command) {
-      logger.warn(`Music command not found`);
-      return; 
+    // تنظيف كلمة play إذا كتبتها بالخطأ عشان ما يبحث عنها كأغنية
+    if (firstWord === 'play') {
+        args.shift();
+        songQuery = args.join(' ');
     }
 
-    // بناء جيل وهمي من الـ Interaction يطابق نظام الـ Slash Command تماماً لتفادي أخطاء الـ Usage
-    const mockInteraction = {
-      isChatInputCommand: () => true,
-      options: {
-        getSubcommand: () => 'play',
-        getString: (name) => {
-          if (name === 'query' || name === 'song' || name === 'search') return songQuery;
-          return null;
+    if (!songQuery) return false;
+
+    // نتأكد إنك ما قاعد تحاول تشغل أمر ثاني مثل p skip أو p help
+    if (firstWord !== 'play') {
+        const resolved = resolveCommandAlias(firstWord);
+        const isMusicShortcut = new Set(['leave', 'pause', 'resume', 'skip', 'stop', 'volume', 'queue']).has(firstWord);
+        if (client.commands.has(resolved) || isMusicShortcut) {
+            return false; 
         }
-      },
-      guildId: message.guild.id,
-      guild: message.guild,
-      channelId: message.channel.id,
-      channel: message.channel,
-      user: message.author,
-      member: message.member,
-      client: client,
-      deferReply: async () => { return; },
-      editReply: async (options) => {
-        return await message.channel.send(options).catch(() => {});
-      },
-      reply: async (options) => {
-        return await message.channel.send(options).catch(() => {});
-      },
-      followUp: async (options) => {
-        return await message.channel.send(options).catch(() => {});
-      }
+    }
+
+    // هنا السر: نستدعي أمر play بدال music!
+    const command = client.commands.get('play');
+    if (!command) {
+        return false;
+    }
+
+    logger.info(`[MAGIC PLAY] Executing slash play command in background for: ${songQuery}`);
+
+    // نوهم البوت إنك استخدمت أمر السلاش عشان يتخطى كل الحمايات
+    const mockInteraction = {
+        isChatInputCommand: () => true,
+        commandName: 'play',
+        options: {
+            getSubcommand: () => null,
+            getString: () => songQuery
+        },
+        guildId: message.guild.id,
+        guild: message.guild,
+        channelId: message.channel.id,
+        channel: message.channel,
+        user: message.author,
+        member: message.member,
+        client: client,
+        deferReply: async () => {},
+        editReply: async (options) => { await message.channel.send(options).catch(() => {}); },
+        reply: async (options) => { await message.channel.send(options).catch(() => {}); },
+        followUp: async (options) => { await message.channel.send(options).catch(() => {}); }
     };
 
-    // فحص الحماية من السبام والـ Cooldown
-    const abuseProtection = await enforceAbuseProtection(mockInteraction, command, 'music');
-    if (!abuseProtection.allowed) {
-      const formattedCooldown = formatCooldownDuration(abuseProtection.remainingMs);
-      const embed = createEmbed({
-        title: 'Command Cooldown',
-        description: `This command is on cooldown. Please wait ${formattedCooldown} before trying again.`,
-        color: 'error',
-      });
-      await message.channel.send({ embeds: [embed] }).catch(() => {});
-      return;
-    }
-
-    // تشغيل دالة الـ Slash Command مباشرة لتخطي فلترة الـ prefix المعطوبة بالمشروع
     if (command.execute) {
-      await command.execute(mockInteraction, client);
-    } else {
-      logger.error('Music command does not have an execute function');
+        await command.execute(mockInteraction, client);
+        return true;
     }
 
-  } catch (error) {
-    logger.error('Error handling prefix command:', error);
-  }
-}
-
-async function handleCountingGame(message, client) {
-  try {
-    const config = await getCountingGameConfig(client, message.guild.id);
-    if (!config.enabled || !config.channelId || message.channel.id !== config.channelId) {
-      return false;
-    }
-
-    const content = message.content.trim();
-    const validCount = isValidCountingMessage(content, config);
-    const invalidAttempt = !validCount || message.author.id === config.lastUserId;
-
-    if (invalidAttempt) {
-      await message.delete().catch(() => {});
-      await saveCountingGameConfig(client, message.guild.id, {
-        ...config,
-        nextNumber: 1,
-        lastUserId: null,
-        currentStreak: 0,
-      });
-
-      const failureMessage = await message.channel.send(`❌ Count broken by <@${message.author.id}>. The sequence has been reset to **1**.`);
-      setTimeout(() => {
-        failureMessage.delete().catch(() => {});
-      }, 10000);
-
-      return true;
-    }
-
-    await recordCorrectCount(client, message.guild.id, message.author.id);
-    return true;
-  } catch (error) {
-    logger.error('Error handling counting game:', error);
     return false;
-  }
 }
 
-async function handleLeveling(message, client) {
-  try {
-    const rateLimitKey = `xp-event:${message.guild.id}:${message.author.id}`;
-    const canProcess = await checkRateLimit(rateLimitKey, MESSAGE_XP_RATE_LIMIT_ATTEMPTS, MESSAGE_XP_RATE_LIMIT_WINDOW_MS);
-    if (!canProcess) {
-      return;
-    }
-
-    const levelingConfig = await getLevelingConfig(client, message.guild.id);
-    
-    if (!levelingConfig?.enabled) {
-      return;
-    }
-
-    if (levelingConfig.ignoredChannels?.includes(message.channel.id)) {
-      return;
-    }
-
-    if (levelingConfig.ignoredRoles?.length > 0) {
-      const member = await message.guild.members.fetch(message.author.id).catch(() => {
-        return null;
-      });
-      if (member && member.roles.cache.some(role => levelingConfig.ignoredRoles.includes(role.id))) {
-        return;
-      }
-    }
-
-    if (levelingConfig.blacklistedUsers?.includes(message.author.id)) {
-      return;
-    }
-
-    if (!message.content || message.content.trim().length === 0) {
-      return;
-    }
-
-    const userData = await getUserLevelData(client, message.guild.id, message.author.id);
-
-    const cooldownTime = levelingConfig.xpCooldown || 60;
-    const now = Date.now();
-    const timeSinceLastMessage = now - (userData.lastMessage || 0);
-
-    if (timeSinceLastMessage < cooldownTime * 1000) {
-      return;
-    }
-
-    const minXP = levelingConfig.xpRange?.min || levelingConfig.xpPerMessage?.min || 15;
-    const maxXP = levelingConfig.xpRange?.max || levelingConfig.xpPerMessage?.max || 25;
-
-    const safeMinXP = Math.max(1, minXP);
-    const safeMaxXP = Math.max(safeMinXP, maxXP);
-
-    const xpToGive = Math.floor(Math.random() * (safeMaxXP - safeMinXP + 1)) + safeMinXP;
-
-    let finalXP = xpToGive;
-    if (levelingConfig.xpMultiplier && levelingConfig.xpMultiplier > 1) {
-      finalXP = Math.floor(finalXP * levelingConfig.xpMultiplier);
-    }
-
-    const result = await addXp(client, message.guild, message.member, finalXP);
-    
-    if (result.success && result.leveledUp) {
-      logger.info(
-        `${message.author.tag} leveled up to level ${result.level} in ${message.guild.name}`
-      );
-    }
-  } catch (error) {
-    logger.error('Error handling leveling for message:', error);
-  }
-}
-      await handleLeveling(message, client);
-    } catch (error) {
-      logger.error('Error in messageCreate event:', error);
-    }
-  }
-};
-
+// ⚙️ دالة البوت الأصلية (رجعناها زي ما كانت عشان ما يخرب شيء ثاني)
 async function handlePrefixCommand(message, client) {
   try {
-    let content = message.content.trim();
-    let lowerContent = content.toLowerCase();
-
-    // التحقق الصارم: يجب أن تبدأ الرسالة بحرف p ومعه مسافة حتماً مثل: p creep
-    if (!lowerContent.startsWith('p ')) return;
-
-    // قطع حرف الـ p والمسافة وأخذ اسم الأغنية أو الأمر المكتوب بعدها
-    const remain = content.slice(2).trim().split(/ +/);
-    const firstWord = remain[0]?.toLowerCase();
+    const guildConfig = await getGuildConfig(client, message.guild.id);
+    const prefix = guildConfig?.prefix || client.config.bot.prefix || '!';
+    const parsed = parsePrefixCommand(message.content, prefix);
     
-    if (!firstWord) return;
-
-    let args = [];
-
-    // إذا كتبت p play creep يتعامل معها بشكل طبيعي
-    if (firstWord === 'play') {
-      remain.shift(); // حذف كلمة play من الأرجومنتس
-      args = ['play', ...remain];
-    } 
-    // إذا كتبت p creep على طول، يحولها تلقائياً بالخلفية إلى أمر تشغيل للأغنية
-    else {
-      args = ['play', ...remain];
+    if (!parsed) {
+      return; 
     }
 
-    const guildConfig = await getGuildConfig(client, message.guild.id);
-    const prefix = 'p '; 
+    let { commandName, args } = parsed;
+    const musicPrefixShortcut = commandName.toLowerCase();
+    const MUSIC_PREFIX_SHORTCUTS = new Set(['leave', 'pause', 'resume', 'skip', 'stop', 'volume']);
+    if (MUSIC_PREFIX_SHORTCUTS.has(musicPrefixShortcut)) {
+      commandName = 'music';
+      args = [musicPrefixShortcut, ...args];
+    }
 
-    logger.info(`[DIRECT P MUSIC] Forwarding args: ${args.join(', ')}`);
+    const resolvedCommandName = resolveCommandAlias(commandName);
+    const command = client.commands.get(resolvedCommandName);
 
-    const command = client.commands.get('music');
     if (!command) {
-      logger.warn(`Music command not found`);
       return; 
+    }
+
+    const restriction = getPrefixRestriction(command, args, resolveSubcommandAlias);
+    if (!supportsPrefixExecution(command) || restriction.blocked) {
+      if (restriction.blocked && restriction.reason) {
+        const embed = createEmbed({
+          title: 'Slash Command Only',
+          description: `${restriction.reason}\nUse \`/${resolvedCommandName}\` instead.`,
+          color: 'info',
+        });
+        await message.channel.send({ embeds: [embed] }).catch(() => {});
+      }
+      return;
     }
 
     if (!(await isCommandEnabled(client, message.guild.id, resolvePrefixAccessKey(command.data, args), command.category))) {
-      const embed = createEmbed({
-        title: 'Command Disabled',
-        description: 'This command has been disabled for this server.',
-        color: 'error',
-      });
-      await message.channel.send({ embeds: [embed] }).catch(() => {});
       return;
     }
 
@@ -282,7 +164,11 @@ async function handlePrefixCommand(message, client) {
       guildId: message.guild.id,
       user: message.author,
     };
-    const abuseProtection = await enforceAbuseProtection(mockInteractionForProtection, command, 'music');
+    const abuseProtection = await enforceAbuseProtection(
+      mockInteractionForProtection,
+      command,
+      resolvedCommandName,
+    );
     if (!abuseProtection.allowed) {
       const formattedCooldown = formatCooldownDuration(abuseProtection.remainingMs);
       const embed = createEmbed({
