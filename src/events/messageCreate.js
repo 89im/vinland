@@ -27,12 +27,13 @@ export default {
     try {
       if (message.author.bot || !message.guild) return;
 
+      // 1. معالجة اختصار الموسيقى أولاً
+      const magicExecuted = await interceptMagicPlay(message, client);
+      if (magicExecuted) return;
+
+      // 2. باقي الوظائف الأساسية
       const countingProcessed = await handleCountingGame(message, client);
       if (countingProcessed) return;
-
-      // 🚀 تشغيل الأغنية السريع مع حماية تعدد البوتات
-      const magicExecuted = await interceptMagicPlay(message, client);
-      if (magicExecuted) return; // الخروج فوراً لعدم تكرار الأوامر
 
       await handlePrefixCommand(message, client);
       await handleLeveling(message, client);
@@ -42,28 +43,182 @@ export default {
   }
 };
 
-// 🎵 الدالة السحرية المطورة (حصرياً للبوت المتواجد في الروم)
+// الدالة السحرية المحدثة
 async function interceptMagicPlay(message, client) {
     let content = message.content.trim();
-    let lowerContent = content.toLowerCase();
+    if (!content.toLowerCase().startsWith('p ')) return false;
 
-    if (!lowerContent.startsWith('p ')) return false;
-
-    let remain = content.slice(2).trim();
-    if (!remain) return false;
-
-    let args = remain.split(/ +/);
-    let firstWord = args[0].toLowerCase();
-    let songQuery = remain;
-
-    if (firstWord === 'play') {
-        args.shift();
-        songQuery = args.join(' ');
-    }
-
+    let songQuery = content.slice(2).trim();
     if (!songQuery) return false;
 
-    if (firstWord !== 'play') {
+    const userVC = message.member?.voice?.channelId;
+    const botMember = message.guild.members.cache.get(client.user.id);
+    const botVC = botMember?.voice?.channelId;
+
+    if (!userVC || botVC !== userVC) {
+        await message.react('👀').catch(() => {});
+        return true; 
+    }
+
+    const command = client.commands.get('play');
+    if (!command) return false;
+
+    await message.react('🎵').catch(() => {});
+
+    const mockInteraction = {
+        options: {
+            getString: () => songQuery
+        },
+        guild: message.guild,
+        channel: message.channel,
+        user: message.author,
+        member: message.member,
+        client: client,
+        deferred: false,
+        replied: false,
+        deferReply: async () => { mockInteraction.deferred = true; },
+        editReply: async (options) => await message.channel.send(options).catch(() => {}),
+        reply: async (options) => { 
+            mockInteraction.replied = true; 
+            return await message.channel.send(options).catch(() => {}); 
+        },
+        followUp: async (options) => await message.channel.send(options).catch(() => {})
+    };
+
+    try {
+        await command.execute(mockInteraction, null, client);
+        return true;
+    } catch (err) {
+        logger.error(`[MAGIC PLAY ERROR]: ${err.message}`);
+        return true; 
+    }
+}
+
+async function handlePrefixCommand(message, client) {
+  try {
+    const guildConfig = await getGuildConfig(client, message.guild.id);
+    const prefix = guildConfig?.prefix || client.config.bot.prefix || '!';
+    const parsed = parsePrefixCommand(message.content, prefix);
+    
+    if (!parsed) return; 
+
+    let { commandName, args } = parsed;
+    const resolvedCommandName = resolveCommandAlias(commandName);
+    const command = client.commands.get(resolvedCommandName);
+
+    if (!command) return; 
+
+    const restriction = getPrefixRestriction(command, args, resolveSubcommandAlias);
+    if (!supportsPrefixExecution(command) || restriction.blocked) {
+      if (restriction.blocked && restriction.reason) {
+        const embed = createEmbed({
+          title: 'Slash Command Only',
+          description: `${restriction.reason}\nUse \`/${resolvedCommandName}\` instead.`,
+          color: 'info',
+        });
+        await message.channel.send({ embeds: [embed] }).catch(() => {});
+      }
+      return;
+    }
+
+    if (!(await isCommandEnabled(client, message.guild.id, resolvePrefixAccessKey(command.data, args), command.category))) {
+      return;
+    }
+
+    const mockInteractionForProtection = { guildId: message.guild.id, user: message.author };
+    const abuseProtection = await enforceAbuseProtection(mockInteractionForProtection, command, resolvedCommandName);
+    
+    if (!abuseProtection.allowed) {
+      const formattedCooldown = formatCooldownDuration(abuseProtection.remainingMs);
+      const embed = createEmbed({
+        title: 'Command Cooldown',
+        description: `This command is on cooldown. Please wait ${formattedCooldown} before trying again.`,
+        color: 'error',
+      });
+      await message.channel.send({ embeds: [embed] }).catch(() => {});
+      return;
+    }
+
+    await executePrefixCommand(command, message, args, client, prefix, guildConfig);
+  } catch (error) {
+    logger.error('Error handling prefix command:', error);
+  }
+}
+
+async function handleCountingGame(message, client) {
+  try {
+    const config = await getCountingGameConfig(client, message.guild.id);
+    if (!config.enabled || !config.channelId || message.channel.id !== config.channelId) {
+      return false;
+    }
+
+    const content = message.content.trim();
+    const validCount = isValidCountingMessage(content, config);
+    const invalidAttempt = !validCount || message.author.id === config.lastUserId;
+
+    if (invalidAttempt) {
+      await message.delete().catch(() => {});
+      await saveCountingGameConfig(client, message.guild.id, {
+        ...config,
+        nextNumber: 1,
+        lastUserId: null,
+        currentStreak: 0,
+      });
+
+      const failureMessage = await message.channel.send(`❌ Count broken by <@${message.author.id}>. The sequence has been reset to **1**.`);
+      setTimeout(() => { failureMessage.delete().catch(() => {}); }, 10000);
+      return true;
+    }
+
+    await recordCorrectCount(client, message.guild.id, message.author.id);
+    return true;
+  } catch (error) {
+    logger.error('Error handling counting game:', error);
+    return false;
+  }
+}
+
+async function handleLeveling(message, client) {
+  try {
+    const rateLimitKey = `xp-event:${message.guild.id}:${message.author.id}`;
+    const canProcess = await checkRateLimit(rateLimitKey, MESSAGE_XP_RATE_LIMIT_ATTEMPTS, MESSAGE_XP_RATE_LIMIT_WINDOW_MS);
+    if (!canProcess) return;
+
+    const levelingConfig = await getLevelingConfig(client, message.guild.id);
+    if (!levelingConfig?.enabled) return;
+    if (levelingConfig.ignoredChannels?.includes(message.channel.id)) return;
+
+    if (levelingConfig.ignoredRoles?.length > 0) {
+      const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+      if (member && member.roles.cache.some(role => levelingConfig.ignoredRoles.includes(role.id))) return;
+    }
+
+    if (levelingConfig.blacklistedUsers?.includes(message.author.id)) return;
+    if (!message.content || message.content.trim().length === 0) return;
+
+    const userData = await getUserLevelData(client, message.guild.id, message.author.id);
+    const cooldownTime = levelingConfig.xpCooldown || 60;
+    const now = Date.now();
+    
+    if (now - (userData.lastMessage || 0) < cooldownTime * 1000) return;
+
+    const minXP = Math.max(1, levelingConfig.xpRange?.min || levelingConfig.xpPerMessage?.min || 15);
+    const maxXP = Math.max(minXP, levelingConfig.xpRange?.max || levelingConfig.xpPerMessage?.max || 25);
+
+    let finalXP = Math.floor(Math.random() * (maxXP - minXP + 1)) + minXP;
+    if (levelingConfig.xpMultiplier && levelingConfig.xpMultiplier > 1) {
+      finalXP = Math.floor(finalXP * levelingConfig.xpMultiplier);
+    }
+
+    const result = await addXp(client, message.guild, message.member, finalXP);
+    if (result.success && result.leveledUp) {
+      logger.info(`${message.author.tag} leveled up to level ${result.level} in ${message.guild.name}`);
+    }
+  } catch (error) {
+    logger.error('Error handling leveling for message:', error);
+  }
+}
+if (firstWord !== 'play') {
         const resolved = resolveCommandAlias(firstWord);
         const isMusicShortcut = new Set(['leave', 'pause', 'resume', 'skip', 'stop', 'volume', 'queue']).has(firstWord);
         if (client.commands.has(resolved) || isMusicShortcut) {
