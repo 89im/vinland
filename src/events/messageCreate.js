@@ -47,14 +47,13 @@ async function handlePrefixCommand(message, client) {
     let content = message.content.trim();
     let lowerContent = content.toLowerCase();
 
-    // التحقق الصارم: هل الرسالة تبدأ بحرف p؟
+    // التأكد الصارم أن الرسالة تبدأ بحرف p
     if (!lowerContent.startsWith('p')) return;
 
-    let commandName = 'music';
-    let args = ['play'];
+    let args = [];
 
-    // 1. التعامل مع صيغة: p play creep أو p play creep
-    if (lowerContent.startsWith('p ') || lowerContent.startsWith('p-') || lowerContent.startsWith('p!')) {
+    // 1. إذا كتبت: p play creep أو p creep
+    if (lowerContent.startsWith('p ')) {
       const remain = content.slice(1).trim().split(/ +/);
       const sub = remain.shift()?.toLowerCase();
       
@@ -64,12 +63,12 @@ async function handlePrefixCommand(message, client) {
         args = ['play', sub, ...remain].filter(Boolean);
       }
     } 
-    // 2. التعامل مع صيغة: pplay creep
-    else if (lowerContent.startsWith('pplay')) {
+    // 2. إذا كتبت: pplay creep
+    else if (lowerContent.startsWith('p')) {
       const remain = content.slice(5).trim().split(/ +/);
       args = ['play', ...remain];
     }
-    // 3. التعامل مع صيغة الاختصار السريع: pcreep
+    // 3. إذا كتبت السريع على طول: pcreep
     else {
       const remain = content.slice(1).trim().split(/ +/);
       if (remain.length === 0 || remain[0] === '') return;
@@ -77,17 +76,18 @@ async function handlePrefixCommand(message, client) {
     }
 
     const guildConfig = await getGuildConfig(client, message.guild.id);
-    const prefix = 'p';
+    
+    // الحل السحري: نوهم الكود الأساسي أن البريفكس الفعلي هو "p" كامل بدون دمج
+    const prefix = 'p '; 
 
-    logger.info(`[FORCED P] Executing music command with args: ${args.join(', ')}`);
+    logger.info(`[FORCED P FIX] Target args: ${args.join(', ')}`);
 
     const command = client.commands.get('music');
     if (!command) {
-      logger.warn(`Music command not found in client.commands`);
+      logger.warn(`Music command not found`);
       return; 
     }
 
-    // فحص الصلاحيات الأساسية فقط وتخطي فلاتر الـ Slash Commands تماماً
     if (!(await isCommandEnabled(client, message.guild.id, resolvePrefixAccessKey(command.data, args), command.category))) {
       const embed = createEmbed({
         title: 'Command Disabled',
@@ -114,7 +114,7 @@ async function handlePrefixCommand(message, client) {
       return;
     }
 
-    // التشغيل الفوري غصب عن أنف النظام
+    // نمرر الترتيب الصحيح تماماً للدالة الأساسية للمشروع
     await executePrefixCommand(command, message, args, client, prefix, guildConfig);
   } catch (error) {
     logger.error('Error handling prefix command:', error);
