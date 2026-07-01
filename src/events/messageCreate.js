@@ -27,20 +27,16 @@ export default {
     try {
       if (message.author.bot || !message.guild) return;
 
-      logger.debug(`Message received from ${message.author.tag}: ${message.content}`);
-
       const countingProcessed = await handleCountingGame(message, client);
       if (countingProcessed) {
         return;
       }
 
-      // 🚀 هنا نظام الاعتراض السحري اللي يلقط p ويشغل الأغنية فوراً
+      // 🚀 نظام التشغيل السريع: يفحص إذا الرسالة تبدأ بـ p لتشغيل الأغنية
       const magicExecuted = await interceptMagicPlay(message, client);
-      if (magicExecuted) return;
+      if (magicExecuted) return; // إذا اشتغلت الأغنية، نوقف هنا عشان ما تتكرر الأوامر
 
-      // إذا ما كانت أغنية، يكمل شغله الطبيعي لباقي الأوامر
       await handlePrefixCommand(message, client);
-
       await handleLeveling(message, client);
     } catch (error) {
       logger.error('Error in messageCreate event:', error);
@@ -48,13 +44,12 @@ export default {
   }
 };
 
-// 🎵 الدالة السحرية لتشغيل الأغاني باختصار p
+// 🎵 الدالة السحرية المعدلة (شاملة وقوية)
 async function interceptMagicPlay(message, client) {
     let content = message.content.trim();
     let lowerContent = content.toLowerCase();
 
-    // نلقط الرسالة فقط إذا بدأت بـ p ومسافة
-    if (!lowerContent.startsWith('p')) return false;
+    if (!lowerContent.startsWith('p ')) return false;
 
     let remain = content.slice(2).trim();
     if (!remain) return false;
@@ -63,38 +58,40 @@ async function interceptMagicPlay(message, client) {
     let firstWord = args[0].toLowerCase();
     let songQuery = remain;
 
-    // تنظيف كلمة play إذا كتبتها بالخطأ عشان ما يبحث عنها كأغنية
-    if (firstWord === 'p') {
+    if (firstWord === 'play') {
         args.shift();
         songQuery = args.join(' ');
     }
 
     if (!songQuery) return false;
 
-    // نتأكد إنك ما قاعد تحاول تشغل أمر ثاني مثل p skip أو p help
-    if (firstWord !== 'p') {
-        const resolved = resolveCommandAlias(firstWord);
-        const isMusicShortcut = new Set(['leave', 'pause', 'resume', 'skip', 'stop', 'volume', 'queue']).has(firstWord);
-        if (client.commands.has(resolved) || isMusicShortcut) {
-            return false; 
-        }
-    }
+    // استدعاء أمر التشغيل الأساسي
+    const command = client.commands.get('play');
+    if (!command) return false;
 
-    // هنا السر: نستدعي أمر play بدال music!
-    const command = client.commands.get('p');
-    if (!command) {
-        return false;
-    }
+    logger.info(`[FAST PLAY] Bypassing slash command for: ${songQuery}`);
 
-    logger.info(`[MAGIC PLAY] Executing slash play command in background for: ${songQuery}`);
-
-    // نوهم البوت إنك استخدمت أمر السلاش عشان يتخطى كل الحمايات
+    // 🛡️ التفاعل الوهمي الشامل: يخدع البوت كلياً ليعتقد أنه تفاعل سلاش نظامي
     const mockInteraction = {
+        type: 2, 
+        id: message.id,
+        applicationId: client.user.id,
         isChatInputCommand: () => true,
-        commandName: 'p',
+        isCommand: () => true,
+        commandName: 'play',
         options: {
             getSubcommand: () => null,
-            getString: () => songQuery
+            getString: () => songQuery, // يرجع اسم الأغنية دائماً
+            get: () => ({ value: songQuery }),
+            getBoolean: () => null,
+            getInteger: () => null,
+            getNumber: () => null,
+            getUser: () => null,
+            getMember: () => null,
+            getChannel: () => null,
+            getRole: () => null,
+            getMentionable: () => null,
+            getAttachment: () => null,
         },
         guildId: message.guild.id,
         guild: message.guild,
@@ -103,45 +100,43 @@ async function interceptMagicPlay(message, client) {
         user: message.author,
         member: message.member,
         client: client,
-        deferReply: async () => {},
-        editReply: async (options) => { await message.channel.send(options).catch(() => {}); },
-        reply: async (options) => { await message.channel.send(options).catch(() => {}); },
-        followUp: async (options) => { await message.channel.send(options).catch(() => {}); }
+        deferred: false,
+        replied: false,
+        deferReply: async () => { mockInteraction.deferred = true; },
+        editReply: async (options) => { return await message.channel.send(options).catch(() => {}); },
+        reply: async (options) => { 
+            mockInteraction.replied = true; 
+            return await message.channel.send(options).catch(() => {}); 
+        },
+        followUp: async (options) => { return await message.channel.send(options).catch(() => {}); },
+        fetchReply: async () => message,
+        deleteReply: async () => {}
     };
 
-    if (command.execute) {
+    try {
         await command.execute(mockInteraction, client);
         return true;
+    } catch (err) {
+        logger.error(`[FAST PLAY ERROR]: ${err.message}`);
+        // إرسال رسالة توضح لك سبب الخطأ لو صار
+        await message.channel.send(`⚠️ ما قدرت أشغل الأغنية، الخطأ: ${err.message}`).catch(()=>{});
+        return true; 
     }
-
-    return false;
 }
 
-// ⚙️ دالة البوت الأصلية (رجعناها زي ما كانت عشان ما يخرب شيء ثاني)
 async function handlePrefixCommand(message, client) {
   try {
     const guildConfig = await getGuildConfig(client, message.guild.id);
     const prefix = guildConfig?.prefix || client.config.bot.prefix || '!';
     const parsed = parsePrefixCommand(message.content, prefix);
     
-    if (!parsed) {
-      return; 
-    }
+    if (!parsed) return; 
 
     let { commandName, args } = parsed;
-    const musicPrefixShortcut = commandName.toLowerCase();
-    const MUSIC_PREFIX_SHORTCUTS = new Set(['leave', 'pause', 'resume', 'skip', 'stop', 'volume']);
-    if (MUSIC_PREFIX_SHORTCUTS.has(musicPrefixShortcut)) {
-      commandName = 'music';
-      args = [musicPrefixShortcut, ...args];
-    }
-
     const resolvedCommandName = resolveCommandAlias(commandName);
     const command = client.commands.get(resolvedCommandName);
 
-    if (!command) {
-      return; 
-    }
+    if (!command) return; 
 
     const restriction = getPrefixRestriction(command, args, resolveSubcommandAlias);
     if (!supportsPrefixExecution(command) || restriction.blocked) {
@@ -160,15 +155,9 @@ async function handlePrefixCommand(message, client) {
       return;
     }
 
-    const mockInteractionForProtection = {
-      guildId: message.guild.id,
-      user: message.author,
-    };
-    const abuseProtection = await enforceAbuseProtection(
-      mockInteractionForProtection,
-      command,
-      resolvedCommandName,
-    );
+    const mockInteractionForProtection = { guildId: message.guild.id, user: message.author };
+    const abuseProtection = await enforceAbuseProtection(mockInteractionForProtection, command, resolvedCommandName);
+    
     if (!abuseProtection.allowed) {
       const formattedCooldown = formatCooldownDuration(abuseProtection.remainingMs);
       const embed = createEmbed({
@@ -207,10 +196,7 @@ async function handleCountingGame(message, client) {
       });
 
       const failureMessage = await message.channel.send(`❌ Count broken by <@${message.author.id}>. The sequence has been reset to **1**.`);
-      setTimeout(() => {
-        failureMessage.delete().catch(() => {});
-      }, 10000);
-
+      setTimeout(() => { failureMessage.delete().catch(() => {}); }, 10000);
       return true;
     }
 
@@ -226,66 +212,37 @@ async function handleLeveling(message, client) {
   try {
     const rateLimitKey = `xp-event:${message.guild.id}:${message.author.id}`;
     const canProcess = await checkRateLimit(rateLimitKey, MESSAGE_XP_RATE_LIMIT_ATTEMPTS, MESSAGE_XP_RATE_LIMIT_WINDOW_MS);
-    if (!canProcess) {
-      return;
-    }
+    if (!canProcess) return;
 
     const levelingConfig = await getLevelingConfig(client, message.guild.id);
-    
-    if (!levelingConfig?.enabled) {
-      return;
-    }
-
-    if (levelingConfig.ignoredChannels?.includes(message.channel.id)) {
-      return;
-    }
+    if (!levelingConfig?.enabled) return;
+    if (levelingConfig.ignoredChannels?.includes(message.channel.id)) return;
 
     if (levelingConfig.ignoredRoles?.length > 0) {
-      const member = await message.guild.members.fetch(message.author.id).catch(() => {
-        return null;
-      });
-      if (member && member.roles.cache.some(role => levelingConfig.ignoredRoles.includes(role.id))) {
-        return;
-      }
+      const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+      if (member && member.roles.cache.some(role => levelingConfig.ignoredRoles.includes(role.id))) return;
     }
 
-    if (levelingConfig.blacklistedUsers?.includes(message.author.id)) {
-      return;
-    }
-
-    if (!message.content || message.content.trim().length === 0) {
-      return;
-    }
+    if (levelingConfig.blacklistedUsers?.includes(message.author.id)) return;
+    if (!message.content || message.content.trim().length === 0) return;
 
     const userData = await getUserLevelData(client, message.guild.id, message.author.id);
-
     const cooldownTime = levelingConfig.xpCooldown || 60;
     const now = Date.now();
-    const timeSinceLastMessage = now - (userData.lastMessage || 0);
+    
+    if (now - (userData.lastMessage || 0) < cooldownTime * 1000) return;
 
-    if (timeSinceLastMessage < cooldownTime * 1000) {
-      return;
-    }
+    const minXP = Math.max(1, levelingConfig.xpRange?.min || levelingConfig.xpPerMessage?.min || 15);
+    const maxXP = Math.max(minXP, levelingConfig.xpRange?.max || levelingConfig.xpPerMessage?.max || 25);
 
-    const minXP = levelingConfig.xpRange?.min || levelingConfig.xpPerMessage?.min || 15;
-    const maxXP = levelingConfig.xpRange?.max || levelingConfig.xpPerMessage?.max || 25;
-
-    const safeMinXP = Math.max(1, minXP);
-    const safeMaxXP = Math.max(safeMinXP, maxXP);
-
-    const xpToGive = Math.floor(Math.random() * (safeMaxXP - safeMinXP + 1)) + safeMinXP;
-
-    let finalXP = xpToGive;
+    let finalXP = Math.floor(Math.random() * (maxXP - minXP + 1)) + minXP;
     if (levelingConfig.xpMultiplier && levelingConfig.xpMultiplier > 1) {
       finalXP = Math.floor(finalXP * levelingConfig.xpMultiplier);
     }
 
     const result = await addXp(client, message.guild, message.member, finalXP);
-    
     if (result.success && result.leveledUp) {
-      logger.info(
-        `${message.author.tag} leveled up to level ${result.level} in ${message.guild.name}`
-      );
+      logger.info(`${message.author.tag} leveled up to level ${result.level} in ${message.guild.name}`);
     }
   } catch (error) {
     logger.error('Error handling leveling for message:', error);
