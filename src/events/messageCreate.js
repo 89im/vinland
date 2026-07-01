@@ -46,25 +46,33 @@ export default {
 async function handlePrefixCommand(message, client) {
   try {
     const guildConfig = await getGuildConfig(client, message.guild.id);
-    const prefix = guildConfig?.prefix || client.config.bot.prefix || '!';
-    const parsed = parsePrefixCommand(message.content, prefix);
+    const prefix = guildConfig?.prefix || client.config.bot.prefix || 'p';
     
-    if (!parsed) {
-      return; 
-    }
+    // فلترة ومقاطعة سريعة للتأكد أن الرسالة تبدأ بحرف p غصب عن نظام السلاش
+    let content = message.content.trim();
+    if (!content.toLowerCase().startsWith('p')) return;
 
-    let { commandName, args } = parsed;
-    const musicPrefixShortcut = commandName.toLowerCase();
-    const MUSIC_PREFIX_SHORTCUTS = new Set(['leave', 'pause', 'resume', 'skip', 'stop', 'volume']);
-    if (MUSIC_PREFIX_SHORTCUTS.has(musicPrefixShortcut)) {
+    // فصل حرف الـ p عن باقي الكلمات التي بعده
+    const argsAfterP = content.slice(1).trim().split(/ +/);
+    let firstArg = argsAfterP.shift()?.toLowerCase();
+
+    if (!firstArg) return;
+
+    let commandName = '';
+    let args = [];
+
+    // إذا كتبت p play creep أو p creep يحولها فورا لأمر الميوزك الشغال داخلياً
+    if (firstArg === 'play' || firstArg === 'p') {
       commandName = 'music';
-      args = [musicPrefixShortcut, ...args];
+      args = ['play', ...argsAfterP];
+    } else {
+      commandName = firstArg;
+      args = argsAfterP;
     }
 
-    logger.info(`Prefix command detected: ${commandName}, args: ${args.join(', ')}`);
+    logger.info(`Prefix command detected via forced 'p': ${commandName}, args: ${args.join(', ')}`);
 
     const resolvedCommandName = resolveCommandAlias(commandName);
-    logger.info(`Resolved command name: ${resolvedCommandName}`);
     const command = client.commands.get(resolvedCommandName);
 
     if (!command) {
@@ -72,19 +80,7 @@ async function handlePrefixCommand(message, client) {
       return; 
     }
 
-    const restriction = getPrefixRestriction(command, args, resolveSubcommandAlias);
-    if (!supportsPrefixExecution(command) || restriction.blocked) {
-      if (restriction.blocked && restriction.reason) {
-        const embed = createEmbed({
-          title: 'Slash Command Only',
-          description: `${restriction.reason}\nUse \`/${resolvedCommandName}\` instead.`,
-          color: 'info',
-        });
-        await message.channel.send({ embeds: [embed] }).catch(() => {});
-      }
-      return;
-    }
-
+    // هنا تم تدمير وتخطي قيود الـ Slash Command عشان يشتغل الـ p بدون رسائل خطأ
     if (!(await isCommandEnabled(client, message.guild.id, resolvePrefixAccessKey(command.data, args), command.category))) {
       const embed = createEmbed({
         title: 'Command Disabled',
@@ -115,7 +111,7 @@ async function handlePrefixCommand(message, client) {
       return;
     }
 
-    logger.info(`Executing prefix command: ${prefix}${commandName} (resolved to ${resolvedCommandName}) by ${message.author.tag}`);
+    logger.info(`Executing forced prefix command: ${prefix} ${commandName} by ${message.author.tag}`);
     
     await executePrefixCommand(command, message, args, client, prefix, guildConfig);
   } catch (error) {
